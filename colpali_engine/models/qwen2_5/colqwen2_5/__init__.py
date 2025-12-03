@@ -1,2 +1,2 @@
-from .modeling_colqwen2_5 import ColQwen2_5
+from .modeling_colqwen2_5 import ColQwen2_5, MetaQwen2_5
 from .processing_colqwen2_5 import ColQwen2_5_Processor

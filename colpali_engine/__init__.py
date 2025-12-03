@@ -15,6 +15,7 @@ from .models import (
     ColPaliProcessor,
     ColQwen2,
     ColQwen2_5,
+    MetaQwen2_5,
     ColQwen2_5_Processor,
     # ColQwen2_5Omni,
     # ColQwen2_5OmniProcessor,

@@ -1,0 +1,5 @@
+python train_metaqwen25_model.py
+accelerate launch --multi-gpu train_metaqwen25_model.py --output-dir results
+
+python -m pip install -e .
+accelerate launch --multi-gpu train_colqwen25_model.py --output-dir results

@@ -303,7 +303,7 @@ All the model configs used can be found in `scripts/configs/` and rely on the [c
 
 
 ```bash
-accelerate launch --multi-gpu scripts/configs/qwen2/train_colqwen25_model.py
+accelerate launch --multi-gpu scripts/configs/qwen2/train_metaqwen25_model.py
 ```
 
 </details>

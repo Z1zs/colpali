@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch.nn import CrossEntropyLoss
-
+from typing import List, Tuple, Dict, Optional
 
 class ColbertModule(torch.nn.Module):
     """
@@ -463,3 +463,129 @@ class ColbertSigmoidLoss(ColbertModule):
         scores = scores.view(-1) / self.temperature
 
         return F.softplus(scores * pos_mask).mean()
+
+
+class MetaEmbedMatryoshkaLoss(ColbertModule):
+    """
+    Implements the Matryoshka Multi-Vector Retrieval (MMR) training objective 
+    from the MetaEmbed paper.
+    
+    It applies a base ColBERT loss to multiple nested groups (prefixes) of the 
+    query and document embeddings.
+    
+    Equation: L_final = sum(w_g * L_NCE(Q[:rq], D[:rc]))
+    """
+    
+    def __init__(
+        self,
+        base_loss_fn: ColbertModule,
+        matryoshka_groups: List[Tuple[int, int]],
+        group_weights: Optional[List[float]] = None,
+    ):
+        """
+        Args:
+            base_loss_fn: An instance of ColbertLoss, ColbertNegativeCELoss, etc.
+            matryoshka_groups: A list of tuples [(q_len1, d_len1), (q_len2, d_len2), ...].
+                               Example: [(1, 1), (2, 4), (4, 8), (16, 64)]
+            group_weights: Optional list of weights for each group. 
+                           If None, defaults to 1.0 for all groups.
+        """
+        super().__init__()
+        self.base_loss_fn = base_loss_fn
+        self.groups = matryoshka_groups
+        
+        if group_weights is None:
+            self.group_weights = [1.0] * len(matryoshka_groups)
+        else:
+            assert len(group_weights) == len(matryoshka_groups), "Weights must match groups length"
+            self.group_weights = group_weights
+
+    def forward(
+        self, 
+        query_embeddings: torch.Tensor, 
+        doc_embeddings: torch.Tensor, 
+        neg_doc_embeddings: Optional[torch.Tensor] = None,
+        offset: int = 0
+    ) -> torch.Tensor:
+        """
+        Computes the weighted sum of losses across all Matryoshka groups.
+        
+        NOTE: This assumes query_embeddings and doc_embeddings are SORTED by granularity.
+        For Coconut/MetaEmbed:
+            - query_embeddings should be the generated Meta Tokens [B, N_meta, D]
+            - doc_embeddings should be the generated Meta Tokens (and/or patches) [B, N_doc, D]
+        
+        Args:
+            query_embeddings: [Batch, N_q_total, Dim]
+            doc_embeddings: [Batch, N_d_total, Dim]
+            neg_doc_embeddings: [Batch, N_neg, N_d_neg_total, Dim] (Optional)
+            offset: Offset for distributed training logic inside base loss.
+        """
+        total_loss = 0.0
+        
+        for idx, (r_q, r_c) in enumerate(self.groups):
+            weight = self.group_weights[idx]
+            
+            # 1. Slicing (The Matryoshka Operation)
+            # We take the first r_q tokens from query and r_c from doc.
+            # Safety check to ensure we don't slice out of bounds
+            cur_q_len = min(r_q, query_embeddings.shape[1])
+            cur_d_len = min(r_c, doc_embeddings.shape[1])
+            
+            q_slice = query_embeddings[:, :cur_q_len, :]
+            d_slice = doc_embeddings[:, :cur_d_len, :]
+            
+            # 2. Compute Base Loss for this group
+            if neg_doc_embeddings is not None:
+                # Handle Explicit Negatives if provided
+                cur_neg_len = min(r_c, neg_doc_embeddings.shape[2])
+                neg_slice = neg_doc_embeddings[:, :, :cur_neg_len, :]
+                
+                loss_group = self.base_loss_fn(q_slice, d_slice, neg_slice, offset=offset)
+            else:
+                # Standard In-batch Negative Loss
+                loss_group = self.base_loss_fn(q_slice, d_slice, offset=offset)
+            
+            # 3. Aggregate
+            total_loss += weight * loss_group
+
+        return total_loss
+
+# -------------------------------------------------------------------------
+# 使用示例 (Usage Example)
+# -------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    # 1. 定义基础 Loss (例如标准的 ColBERT In-batch NCE Loss)
+    base_loss = ColbertLoss(temperature=0.02)
+    
+    # 2. 定义 MetaEmbed 风格的嵌套配置
+    # 论文中推荐的配置示例: Query tokens vs Candidate tokens
+    # (1, 1): 最粗粒度，类似 CLIP/DPR
+    # (2, 4): 稍微细一点
+    # (16, 64): 完整粒度
+    mmr_config = [(1, 1), (2, 4), (4, 8), (8, 16), (16, 64)]
+    
+    # 3. 实例化 Wrapper
+    criterion = MetaEmbedMatryoshkaLoss(
+        base_loss_fn=base_loss,
+        matryoshka_groups=mmr_config
+    )
+    
+    # 4. 模拟数据 (假设从 ColQwen2_5_Coconut 出来的只有 Meta Tokens)
+    B, Dim = 8, 128
+    # 假设生成了 16 个 Query Meta Tokens
+    Q_meta = torch.randn(B, 16, Dim, requires_grad=True) 
+    # 假设生成了 64 个 Doc Meta Tokens (或者 Doc 侧保留了更多)
+    D_meta = torch.randn(B, 64, Dim, requires_grad=True)
+    
+    # 5. 计算 Loss
+    loss = criterion(Q_meta, D_meta)
+    
+    print(f"Total Matryoshka Loss: {loss.item()}")
+    
+    # 6. 反向传播验证
+    loss.backward()
+    print("Gradient computed successfully.")
+    # Q_meta 的梯度流：Q_meta[:, 0] 会收到来自所有 5 个组的梯度叠加
+    # Q_meta[:, 15] 只能收到最后一组 (16, 64) 的梯度

@@ -10,7 +10,7 @@ USE_LOCAL_DATASET = os.environ.get("USE_LOCAL_DATASET", "1") == "1"
 
 
 def load_train_set() -> ColPaliEngineDataset:
-    base_path = "./data_dir/" if USE_LOCAL_DATASET else "vidore/"
+    base_path = "/hpc2hdd/home/jhuo219/models/vidore/"
     dataset = load_dataset(base_path + "colpali_train_set", split="train")
 
     train_dataset = ColPaliEngineDataset(dataset, pos_target_column_name="image")
